@@ -1,0 +1,10 @@
+# init.recovery.mt6761.rc — fixes applied during BF7 investigation:
+#   - missing `import /init.mt6761.usb.rc` broke ADB/USB in recovery; added.
+#   - duplicate `service mobicore` definitions between this file and
+#     vendor/etc/init/trustonic.rc caused a conflict — only ONE definition
+#     should exist across the merged ramdisk. If you regenerate this file
+#     from a fresh twrpdtgen pull, grep the final ramdisk for
+#     "service mobicore" and make sure it appears exactly once before
+#     repacking.
+
+import /init.mt6761.usb.rc
