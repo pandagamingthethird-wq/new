@@ -4,15 +4,22 @@
 # and your manual fixes). Verify against your own stock firmware dump if
 # anything here doesn't match what you observe on a fresh pull.
 
-DEVICE_PATH := device/tecno/TECNO-BF7
+DEVICE_PATH := device/tecno/BF7
 
-# ---- SoC / platform ----------------------------------------------------
-TARGET_BOARD_PLATFORM := mt6761
-TARGET_BOOTLOADER_BOARD_NAME := CY-BF7-H6127
+# Architecture
 TARGET_ARCH := arm64
 TARGET_ARCH_VARIANT := armv8-a
 TARGET_CPU_ABI := arm64-v8a
+TARGET_CPU_ABI2 := 
 TARGET_CPU_VARIANT := generic
+TARGET_CPU_VARIANT_RUNTIME := cortex-a53
+
+TARGET_2ND_ARCH := arm
+TARGET_2ND_ARCH_VARIANT := armv7-a-neon
+TARGET_2ND_CPU_ABI := armeabi-v7a
+TARGET_2ND_CPU_ABI2 := armeabi
+TARGET_2ND_CPU_VARIANT := generic
+TARGET_2ND_CPU_VARIANT_RUNTIME := cortex-a53
 
 PLATFORM_VERSION := 16.1.0
 PLATFORM_SECURITY_PATCH := 2024-06-05
@@ -20,8 +27,7 @@ VENDOR_SECURITY_PATCH := 2024-06-05
 # ^ anti-rollback hack — keep this pinned to what your bootloader expects
 
 # ---- Boot image header ---------------------------------------------------
-BOARD_KERNEL_IMAGE_NAME := Image.gz
-BOARD_KERNEL_HEADER_VERSION := 2
+BOARD_KERNEL_IMAGE_NAME := Image
 BOARD_BOOTIMG_HEADER_VERSION := 2
 BOARD_KERNEL_BASE := 0x40078000
 BOARD_KERNEL_PAGESIZE := 2048
@@ -35,7 +41,7 @@ BOARD_MKBOOTIMG_ARGS += --header_version $(BOARD_BOOTIMG_HEADER_VERSION)
 # confirmed during your rooting investigation)
 TARGET_FORCE_PREBUILT_KERNEL := true
 ifeq ($(TARGET_FORCE_PREBUILT_KERNEL),true)
-TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/prebuilt/Image.gz
+TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/prebuilt/kernel
 TARGET_PREBUILT_DTB := $(DEVICE_PATH)/prebuilt/dtb.img
 BOARD_KERNEL_IMAGE_NAME := Image.gz
 endif
