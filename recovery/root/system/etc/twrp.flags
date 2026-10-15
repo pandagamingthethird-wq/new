@@ -1,0 +1,59 @@
+#fstab file for TECNO BF7 (Spark Go 2023)
+
+# Logical / dynamic partitions (emmc type to avoid mount probe on mapper devices)
+/system_image ext4 /dev/block/mapper/system flags=backup=1;flashimg=1;slotselect
+/vendor_image ext4 /dev/block/mapper/vendor flags=backup=1;flashimg=1;slotselect;
+/product_image ext4 /dev/block/mapper/product flags=backup=1;flashimg=1;slotselect
+/system_ext_image ext4 /dev/block/mapper/system_ext flags=backup=1;flashimg=1;slotselect
+
+# Boot / dtbo
+/boot emmc /dev/block/by-name/boot flags=backup=1;display="Boot";flashimg=1;slotselect
+/dtbo emmc /dev/block/by-name/dtbo flags=backup=1;display="Dtbo";flashimg=1;slotselect
+
+# Persist
+/persist ext4 /dev/block/by-name/persist flags=backup=1;display="Persist"
+
+# AVB / vbmeta
+/vbmeta emmc /dev/block/by-name/vbmeta flags=display="VBMeta";backup=1;flashimg=1
+/vbmeta_system emmc /dev/block/by-name/vbmeta_system flags=display="VBMeta System";backup=1;flashimg=1;slotselect
+/vbmeta_vendor emmc /dev/block/by-name/vbmeta_vendor flags=display="VBMeta Vendor";backup=1;flashimg=1;slotselect
+
+# Bootloader
+/bootloader emmc /dev/block/by-name/lk flags=backup=1;display="Bootloader (lk)";flashimg=1
+/bootloader2 emmc /dev/block/by-name/lk2 flags=backup=1;subpartitionof=/bootloader
+
+# MediaTek misc partitions
+/logo emmc /dev/block/by-name/logo flags=display="Logo";backup=1;flashimg=1
+/seccfg emmc /dev/block/by-name/seccfg flags=display="SecCfg";backup=1
+/misc emmc /dev/block/by-name/para flags=display="Misc";backup=1
+/nvram emmc /dev/block/by-name/nvram flags=display="NvRam";backup=1;flashimg=1
+/proinfo emmc /dev/block/by-name/proinfo flags=display="Proinfo";backup=1
+
+# Protect (SIM related)
+/protect_f ext4 /dev/block/by-name/protect1 flags=display="Protect";backup=1
+/protect_s ext4 /dev/block/by-name/protect2 flags=backup=1;subpartitionof=/protect_f
+
+# TEE / trustzone
+/tee1 emmc /dev/block/by-name/tee1 flags=display="Tee";backup=1
+/tee2 emmc /dev/block/by-name/tee2 flags=backup=1;subpartitionof=/tee1
+
+# FRP
+/persistent emmc /dev/block/by-name/frp flags=display="FRP";backup=1
+
+# Transsion specific
+/tranfs ext4 /dev/block/by-name/tranfs flags=backup=1;display="Transsion FS"
+
+# Modem
+/md1img emmc /dev/block/by-name/md1img flags=display="Modem";backup=1
+/md1dsp emmc /dev/block/by-name/md1dsp flags=display="Modem DSP";backup=1
+/md1arm7 emmc /dev/block/by-name/md1arm7 flags=display="Modem ARM7";backup=1
+
+# SCP / SSPM / SPM
+/scp1 emmc /dev/block/by-name/scp1 flags=display="SCP";backup=1
+/scp2 emmc /dev/block/by-name/scp2 flags=backup=1;subpartitionof=/scp1
+/sspm_1 emmc /dev/block/by-name/sspm_1 flags=display="SSPM";backup=1
+/sspm_2 emmc /dev/block/by-name/sspm_2 flags=backup=1;subpartitionof=/sspm_1
+/spmfw emmc /dev/block/by-name/spmfw flags=display="SPM";backup=1
+
+# External storage
+/external_sd   auto   /dev/block/mmcblk1p1   /dev/block/mmcblk1   flags=display="MicroSD Card";storage;wipeingui;removable
