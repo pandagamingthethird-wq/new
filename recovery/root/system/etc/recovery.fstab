@@ -1,0 +1,22 @@
+# Android fstab file.
+# The filesystem that contains the filesystem checker binary (typically /system) cannot
+# specify MF_CHECK, and must come before any filesystems that do specify MF_CHECK
+
+#<src>                                          <mnt_point>      <type>   <mnt_flags and options>            <fs_mgr_flags>
+# Logical partitions
+system                                          /system          ext4     ro                                 wait,slotselect,logical
+system_ext                                      /system_ext      ext4     ro                                 wait,slotselect,logical
+product                                         /product         ext4     ro                                 wait,slotselect,logical
+vendor                                          /vendor          ext4     ro                                 wait,slotselect,logical
+
+# Metadata partition
+/dev/block/by-name/md_udc                       /metadata        ext4     noatime,nosuid,nodev,discard        wait,check,formattable,first_stage_mount
+
+/dev/block/by-name/userdata /data f2fs noatime,nosuid,nodev,discard,noflush_merge,reserve_root=134217,resgid=1065,inlinecrypt latemount,wait,check,quota,reservedsize=128M,formattable,resize,checkpoint=fs,fileencryption=aes-256-xts:aes-256-cts:v2,keydirectory=/metadata/vold/metadata_encryption,metadata_encryption=aes-256-xts:wrappedkey_v0,fscompress
+# Transsion-specific partition (from stock fstab.mt6761)
+/dev/block/by-name/tranfs                       /tranfs          ext4     noatime,nosuid,nodev,noauto_da_alloc,discard wait,check,formattable,nofail,first_stage_mount
+
+# Need to have this entry in here even though the mount point itself is no longer needed.
+# The update_engine code looks for this entry in order to determine the boot device address
+# and fails if it does not find it.
+/dev/block/by-name/para                         /misc            emmc     defaults                            defaults
