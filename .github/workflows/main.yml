@@ -1,329 +1,205 @@
-#!/usr/bin/env python3
-"""
-builder.py — builds a boot/recovery image for Tecno Spark Go 2023 (BF7)
-that fits the device's 32MB partition budget, automatically shrinking it
-through the same layered strategy as CyberRecoveryProject's image_shrink.c
-(non-destructive steps first, user prompt only if those aren't enough).
+name: Build - TWRP
 
-This is a standalone Python tool — you run it directly against a real
-boot.img, no C toolchain/build step needed, which makes it faster to
-iterate on than the full device tree build while you're still shrinking
-things down. Once you've got a build that fits, the same reasoning is
-what's baked into CyberRecoveryProject's on-device C code.
+# Lives in your DEVICE TREE repo (pandagamingthethird-wq/new), NOT in
+# CyberRecoveryProject. This does a real repo sync against TWRP's own
+# minimal manifest + clones this device tree in + builds from source —
+# no pre-built boot.img upload needed, unlike the magiskboot-hack
+# workflow from earlier.
 
-Requires on PATH: magiskboot, gzip, strip (binutils), dtc (optional, only
-for DTB inspection). Run this under WSL / a Linux shell on Windows, same
-place your existing magiskboot/CI workflow already runs.
+on:
+  workflow_dispatch:
+    inputs:
+      MANIFEST_BRANCH:
+        description: 'TWRP Minimal-Manifest Branch'
+        required: true
+        default: 'twrp-12.1'
+        type: choice
+        options:
+        - twrp-12.1
+        - twrp-11
+        - twrp-9.0
+        - twrp-8.1
+      DEVICE_TREE:
+        description: 'Device Tree repo URL'
+        required: true
+        default: 'https://github.com/pandagamingthethird-wq/new/'
+      DEVICE_TREE_BRANCH:
+        description: 'Device Tree branch'
+        required: true
+        default: 'main'
+      DEVICE_PATH:
+        description: 'Device path — MUST match DEVICE_PATH in BoardConfig.mk exactly'
+        required: true
+        default: 'device/tecno/TECNO-BF7'
+      DEVICE_NAME:
+        description: 'Device codename — MUST match PRODUCT_DEVICE in twrp_BF7.mk exactly'
+        required: true
+        default: 'BF7'
+      BUILD_TARGET:
+        description: 'Build target'
+        required: true
+        default: 'boot'
+        type: choice
+        options:
+        - boot
+        - recovery
+        - vendorboot
+      LDCHECK:
+        description: 'Path of a blob to check dependencies for (MTK device — NOT a Qualcomm blob like qseecomd)'
+        required: true
+        default: 'system/bin/mcDrvDaemon'
 
-Usage:
-    python3 builder.py patched-boot.img --out boot-32mb.img
-    python3 builder.py patched-boot.img --out boot-32mb.img --target-mb 32
-    python3 builder.py patched-boot.img --out boot-32mb.img --dry-run
-"""
+jobs:
+  build:
+    name: Build TWRP by ${{ github.actor }}
+    runs-on: ubuntu-24.04
+    if: github.event.repository.owner.id == github.event.sender.id
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: write
+    steps:
+    - name: Check Out
+      uses: actions/checkout@v6
 
-import argparse
-import json
-import os
-import shutil
-import subprocess
-import sys
-import tempfile
+    - name: Display Inputs
+      run: |
+        echo "Manifest Branch: ${{ github.event.inputs.MANIFEST_BRANCH }}"
+        echo "Device Tree: ${{ github.event.inputs.DEVICE_TREE }}"
+        echo "Device Branch: ${{ github.event.inputs.DEVICE_TREE_BRANCH }}"
+        echo "Device Path: ${{ github.event.inputs.DEVICE_PATH }}"
+        echo "Device Name: ${{ github.event.inputs.DEVICE_NAME }}"
+        echo "Build Target: ${{ github.event.inputs.BUILD_TARGET }}image"
 
-# ---- BF7-specific constants (from your confirmed device investigation) ---
-TARGET_PARTITION_BYTES_DEFAULT = 33_554_432  # 32MB boot/recovery budget
-MTK_DTB_HEADER_SIZE = 64                      # proprietary MTK DTB wrapper
-RAMDISK_COMPRESSION = "gzip"                  # kernel only has CONFIG_RD_GZIP
-STOCK_REFERENCE = {                           # sanity baseline, not inputs
-    "kernel": 11_883_603,
-    "ramdisk": 13_413_567,
-    "dtb": 121_231,
-}
+    - name: Cleanup
+      uses: rokibhasansagar/slimhub_actions@main
 
-KNOWN_DEBUG_PATTERNS = [
-    "libclang_rt.ubsan_standalone-aarch64-android.so",
-    "libasan.so",
-    "strace",
-    "gdbserver",
-]
-KNOWN_UNUSED_EXTRAS = ["bin/bash", "bin/nano", "lib64/libssh.so"]
+    - name: Set Swap Space
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 24
 
+    - name: Prepare the environment
+      run: |
+        sudo apt update && sudo apt upgrade -y
+        DEBIAN_FRONTEND=noninteractive sudo apt install -yq \
+            linux-modules-extra-$(uname -r) \
+            gperf gcc-multilib gcc-10-multilib g++-multilib g++-10-multilib \
+            libc6-dev lib32ncurses-dev x11proto-core-dev libx11-dev tree lib32z-dev libgl1-mesa-dev libxml2-utils \
+            xsltproc bc ccache lib32readline-dev lib32z1-dev liblz4-tool libncurses-dev libsdl1.2-dev \
+            build-essential libgtk-3-dev libglu1-mesa-dev freeglut3-dev git libxml2 lzop pngcrush schedtool squashfs-tools \
+            imagemagick libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev libncurses6 python3 tar
 
-def human(n: int) -> str:
-    n = float(n)
-    for unit in ["B", "KB", "MB", "GB"]:
-        if abs(n) < 1024:
-            return f"{n:.1f}{unit}"
-        n /= 1024
-    return f"{n:.1f}TB"
+    - name: Install OpenJDK
+      uses: actions/setup-java@v5
+      with:
+        distribution: 'zulu'
+        java-version: '8'
 
+    - name: Install Git-Repo
+      run: |
+        mkdir ~/bin
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        chmod a+x ~/bin/repo
+        sudo ln -sf ~/bin/repo /usr/bin/repo
 
-def run(cmd, **kw):
-    return subprocess.run(cmd, shell=True, **kw)
+    - name: Check Manifest Branch
+      id: manifest
+      run: |
+         if [[ "${{ github.event.inputs.MANIFEST_BRANCH }}" == "twrp-11" || "${{ github.event.inputs.MANIFEST_BRANCH }}" == "twrp-12.1" ]]; then
+           echo "value=https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git" >> "$GITHUB_OUTPUT"
+         else
+           echo "value=https://github.com/sounddrill31/platform_manifest_twrp_omni.git" >> "$GITHUB_OUTPUT"
+         fi
 
+    - name: Initialize Repo
+      run: |
+        mkdir android-recovery
+        cd android-recovery
+        git config --global user.name "${{ github.actor }}"
+        git config --global user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+        repo init --depth=1 -u ${{ steps.manifest.outputs.value }} -b ${{ github.event.inputs.MANIFEST_BRANCH }}
+        sed -i '/<remove-project name="platform\/external\/gflags"  \/>/d' .repo/manifests/remove-minimal.xml
 
-def require_tool(name):
-    if not shutil.which(name):
-        print(f"ERROR: `{name}` not found on PATH. This script needs to run "
-              f"where your magiskboot/binutils toolchain already lives "
-              f"(WSL, same shell as your existing CI steps).", file=sys.stderr)
-        sys.exit(1)
+    - name: Repo Sync
+      run: |
+        cd android-recovery
+        repo sync -j$(nproc --all) --force-sync
 
+    - name: Clone Device Tree
+      run: |
+        cd android-recovery
+        git clone ${{ github.event.inputs.DEVICE_TREE }} -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} ./${{ github.event.inputs.DEVICE_PATH }}
+        cd ${{ github.event.inputs.DEVICE_PATH }}
+        [ -f recovery/root/sbin/fsck.f2fs ] && chmod +x recovery/root/sbin/fsck.f2fs
+        echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
 
-def dir_size(path: str) -> int:
-    total = 0
-    for root, _, files in os.walk(path):
-        for f in files:
-            fp = os.path.join(root, f)
-            if not os.path.islink(fp):
-                try:
-                    total += os.path.getsize(fp)
-                except OSError:
-                    pass
-    return total
+    - name: Check Build Makefile
+      run: |
+        cd android-recovery
+        if [ -f ${{ github.event.inputs.DEVICE_PATH }}/twrp_${{ github.event.inputs.DEVICE_NAME }}.mk ]; then
+            echo "DEVICE_MAKEFILE=twrp_${{ github.event.inputs.DEVICE_NAME }}" >> $GITHUB_ENV
+        elif [ -f ${{ github.event.inputs.DEVICE_PATH }}/omni_${{ github.event.inputs.DEVICE_NAME }}.mk ]; then
+            echo "DEVICE_MAKEFILE=omni_${{ github.event.inputs.DEVICE_NAME }}" >> $GITHUB_ENV
+        else
+            echo "::error::No twrp_${{ github.event.inputs.DEVICE_NAME }}.mk or omni_${{ github.event.inputs.DEVICE_NAME }}.mk found at ${{ github.event.inputs.DEVICE_PATH }} — DEVICE_PATH/DEVICE_NAME likely don't match your actual tree."
+            exit 1
+        fi
 
+    - name: Install Python 2
+      if: github.event.inputs.MANIFEST_BRANCH != 'twrp-11' && github.event.inputs.MANIFEST_BRANCH != 'twrp-12.1'
+      run: |
+        sudo apt -y install python
+        sudo rm -rf /usr/bin/python
+        sudo ln -s /usr/bin/python2 /usr/bin/python
 
-def unpack(image_path: str, workdir: str):
-    """Unpack via magiskboot, then slice MTK's header off dtb.img if present."""
-    require_tool("magiskboot")
-    log_path = os.path.join(workdir, "unpack.log")
-    with open(log_path, "w") as log:
-        r = run(f"cd '{workdir}' && magiskboot unpack '{os.path.abspath(image_path)}'",
-                stdout=log, stderr=subprocess.STDOUT)
-    if r.returncode != 0:
-        print(f"magiskboot unpack failed — see {log_path}", file=sys.stderr)
-        sys.exit(1)
+    - name: Building Image
+      run: |
+        cd android-recovery
+        source build/envsetup.sh
+        export ALLOW_MISSING_DEPENDENCIES=true
+        lunch ${{ env.DEVICE_MAKEFILE }}-eng && make clean && make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
+        echo "Done building your ${{ github.event.inputs.BUILD_TARGET }}.img"
 
-    dtb_path = os.path.join(workdir, "dtb.img")
-    if os.path.exists(dtb_path):
-        size = os.path.getsize(dtb_path)
-        if size > MTK_DTB_HEADER_SIZE:
-            with open(dtb_path, "rb") as f:
-                f.seek(MTK_DTB_HEADER_SIZE)
-                real = f.read()
-            with open(dtb_path, "wb") as f:
-                f.write(real)
-            print(f"  Sliced {MTK_DTB_HEADER_SIZE}-byte MTK header off dtb.img "
-                  f"({human(size)} -> {human(len(real))})")
+    - name: Set Build Date
+      run: |
+        echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
 
+    - name: Upload to Release (boot and recovery)
+      if: github.event.inputs.BUILD_TARGET == 'boot' || github.event.inputs.BUILD_TARGET == 'recovery'
+      uses: softprops/action-gh-release@v3
+      with:
+        files: |
+          android-recovery/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img
+        name: Unofficial TWRP for ${{ github.event.inputs.DEVICE_NAME }} // ${{ env.BUILD_DATE }}
+        tag_name: ${{ github.run_id }}
+        body: |
+          Build: ${{ github.event.inputs.MANIFEST_BRANCH }}
+          Device: [Device Tree/Branch](${{ github.event.inputs.DEVICE_TREE }}/tree/${{ github.event.inputs.DEVICE_TREE_BRANCH }})
+          Commit: [commit](${{ github.event.inputs.DEVICE_TREE }}/commit/${{ env.COMMIT_ID }}) used for this build.
 
-def extract_ramdisk(workdir: str):
-    """Expand ramdisk.cpio into a browsable ramdisk/ folder for strategies
-    that need to inspect/remove individual files."""
-    cpio = os.path.join(workdir, "ramdisk.cpio")
-    extracted = os.path.join(workdir, "ramdisk")
-    if not os.path.exists(cpio):
-        return None
-    os.makedirs(extracted, exist_ok=True)
-    run(f"cd '{extracted}' && cpio -idm < '{cpio}'",
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return extracted
+    - name: Upload to Release (if vendor_boot)
+      if: github.event.inputs.BUILD_TARGET == 'vendorboot'
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          android-recovery/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/vendor_boot.img
+        name: Unofficial TWRP for ${{ github.event.inputs.DEVICE_NAME }} // ${{ env.BUILD_DATE }}
+        tag_name: ${{ github.run_id }}
+        body: |
+          Build: ${{ github.event.inputs.MANIFEST_BRANCH }}
+          Device: [Device Tree/Branch](${{ github.event.inputs.DEVICE_TREE }}/tree/${{ github.event.inputs.DEVICE_TREE_BRANCH }})
+          Commit: [commit](${{ github.event.inputs.DEVICE_TREE }}/commit/${{ env.COMMIT_ID }}) used for this build.
 
-
-def find_matches(root: str, needles):
-    matches = []
-    for dirpath, _, files in os.walk(root):
-        for f in files:
-            full = os.path.join(dirpath, f)
-            rel = os.path.relpath(full, root)
-            for needle in needles:
-                if needle in rel:
-                    try:
-                        size = os.path.getsize(full)
-                    except OSError:
-                        size = 0
-                    matches.append((full, rel, size))
-    return matches
-
-
-def strategy_strip_debug_runtimes(ramdisk_dir: str, apply: bool) -> int:
-    matches = find_matches(ramdisk_dir, KNOWN_DEBUG_PATTERNS)
-    freed = sum(m[2] for m in matches)
-    print(f"[1] Strip debug/sanitizer runtimes — {len(matches)} file(s), {human(freed)}")
-    for full, rel, size in matches:
-        print(f"      {rel} ({human(size)})")
-        if apply:
-            os.remove(full)
-    return freed if apply else freed
-
-
-def strategy_strip_known_unused(ramdisk_dir: str, apply: bool) -> int:
-    matches = find_matches(ramdisk_dir, KNOWN_UNUSED_EXTRAS)
-    freed = sum(m[2] for m in matches)
-    print(f"[2] Strip known-unused extras (bash/nano/libssh) — {len(matches)} file(s), {human(freed)}")
-    for full, rel, size in matches:
-        print(f"      {rel} ({human(size)})")
-        if apply:
-            os.remove(full)
-    return freed
-
-
-def strategy_strip_symbols(ramdisk_dir: str, apply: bool) -> int:
-    if not shutil.which("strip"):
-        print("[3] Strip ELF symbols — SKIPPED (no `strip` on PATH)")
-        return 0
-    before = dir_size(ramdisk_dir)
-    if apply:
-        for dirpath, _, files in os.walk(ramdisk_dir):
-            for f in files:
-                full = os.path.join(dirpath, f)
-                if full.endswith(".so") or f"{os.sep}bin{os.sep}" in full:
-                    run(f"strip --strip-unneeded '{full}'",
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        after = dir_size(ramdisk_dir)
-        freed = max(before - after, 0)
-        print(f"[3] Strip ELF symbols — freed {human(freed)}")
-        return freed
-    else:
-        print("[3] Strip ELF symbols — (dry-run: impact only known with --apply)")
-        return 0
-
-
-def regenerate_ramdisk(workdir: str, ramdisk_dir: str):
-    """Rebuild ramdisk.cpio.gz from the (possibly shrunk) ramdisk/ folder.
-    ALWAYS regenerates from source — never trusts a cached .comp file.
-    This is the direct fix for the 'edits don't survive repack' bug you
-    hit before."""
-    cpio = os.path.join(workdir, "ramdisk.cpio")
-    comp = os.path.join(workdir, "ramdisk.cpio.gz")
-    r = run(f"cd '{ramdisk_dir}' && find . | cpio -o -H newc > '{cpio}' 2>/dev/null")
-    if r.returncode != 0:
-        print("ERROR: failed to regenerate ramdisk.cpio from folder", file=sys.stderr)
-        sys.exit(1)
-    run(f"gzip -9 -f -c '{cpio}' > '{comp}'")
-    print(f"  Regenerated ramdisk.cpio.gz from ramdisk/ folder "
-          f"({human(os.path.getsize(comp))})")
-
-
-def current_size(workdir: str) -> int:
-    return dir_size(workdir)
-
-
-TRADEOFFS = {
-    "extra_languages": {
-        "description": "Remove extra language packs (keep English + device default)",
-        "pattern": ["res/values-"],
-        "keep_pattern": "values-en",
-    },
-    "theme_hires_assets": {
-        "description": "Remove high-resolution theme assets",
-        "pattern": ["theme/"],
-        "keep_pattern": None,
-    },
-}
-
-
-def prompt_tradeoffs(ramdisk_dir: str, bytes_needed: int) -> int:
-    print(f"\nAutomatic shrinking wasn't enough — still need to free "
-          f"~{human(bytes_needed)}.")
-    print("Available trade-offs:")
-    keys = list(TRADEOFFS.keys())
-    for i, k in enumerate(keys):
-        print(f"  [{i}] {TRADEOFFS[k]['description']}")
-    print(f"  [c] Cancel")
-
-    choice = input("Apply which? (comma-separated indices, or c to cancel): ").strip()
-    if choice.lower() == "c" or choice == "":
-        return 0
-
-    freed_total = 0
-    for idx_str in choice.split(","):
-        idx_str = idx_str.strip()
-        if not idx_str.isdigit():
-            continue
-        idx = int(idx_str)
-        if idx < 0 or idx >= len(keys):
-            continue
-        key = keys[idx]
-        spec = TRADEOFFS[key]
-        matches = find_matches(ramdisk_dir, spec["pattern"])
-        for full, rel, size in matches:
-            if spec["keep_pattern"] and spec["keep_pattern"] in rel:
-                continue
-            os.remove(full)
-            freed_total += size
-    return freed_total
-
-
-def build(image_path: str, out_path: str, target_mb: float, dry_run: bool, interactive: bool):
-    require_tool("magiskboot")
-    target_bytes = int(target_mb * 1024 * 1024)
-
-    with tempfile.TemporaryDirectory(prefix="bf7_build_") as workdir:
-        print(f"Unpacking {image_path} ...")
-        unpack(image_path, workdir)
-
-        ramdisk_dir = extract_ramdisk(workdir)
-        if not ramdisk_dir:
-            print("WARNING: no ramdisk.cpio found after unpack — nothing to shrink, "
-                  "will just repack as-is.")
-
-        size = current_size(workdir)
-        print(f"\nUnpacked size: {human(size)} (target: {human(target_bytes)})")
-
-        for name, ref in STOCK_REFERENCE.items():
-            print(f"  (stock {name} reference: {human(ref)})")
-
-        if size <= target_bytes:
-            print("Already within budget — no shrinking needed.")
-        elif ramdisk_dir:
-            apply = not dry_run
-            freed = 0
-            freed += strategy_strip_debug_runtimes(ramdisk_dir, apply)
-            freed += strategy_strip_known_unused(ramdisk_dir, apply)
-            freed += strategy_strip_symbols(ramdisk_dir, apply)
-
-            remaining = size - target_bytes - freed
-            if remaining > 0 and apply and interactive:
-                freed += prompt_tradeoffs(ramdisk_dir, remaining)
-            elif remaining > 0:
-                print(f"\nStill ~{human(remaining)} over budget after automatic "
-                      f"strategies. Re-run with --apply (and without --no-interactive) "
-                      f"to be prompted for trade-offs, or trim manually.")
-
-        if dry_run:
-            print("\nDry run complete — nothing was written. "
-                  "Re-run without --dry-run to actually build.")
-            return
-
-        if ramdisk_dir:
-            print("\nRegenerating ramdisk from (possibly shrunk) folder ...")
-            regenerate_ramdisk(workdir, ramdisk_dir)
-
-        print("Repacking ...")
-        r = run(f"cd '{workdir}' && magiskboot repack original '{os.path.abspath(out_path)}'")
-        if r.returncode != 0:
-            print("ERROR: magiskboot repack failed", file=sys.stderr)
-            sys.exit(1)
-
-        final_size = os.path.getsize(out_path)
-        print(f"\nBuilt: {out_path} ({human(final_size)})")
-        if final_size > target_bytes:
-            print(f"⚠️  STILL {human(final_size - target_bytes)} over the {target_mb}MB "
-                  f"budget — avbtool's add_hash_footer check will fail on this. "
-                  f"Try again with trade-offs applied, or pick a larger target.")
-        else:
-            print(f"✅ Fits within {target_mb}MB with {human(target_bytes - final_size)} to spare.")
-
-
-def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("image", help="Path to the source boot.img (already patched, pre-shrink)")
-    ap.add_argument("--out", required=True, help="Path to write the final boot.img")
-    ap.add_argument("--target-mb", type=float, default=32,
-                     help="Target partition size in MB (default: 32, this device's budget)")
-    ap.add_argument("--dry-run", action="store_true",
-                     help="Report what would happen; write nothing")
-    ap.add_argument("--no-interactive", dest="interactive", action="store_false",
-                     help="Never prompt for trade-offs (fail instead if automatic steps aren't enough) — use this in CI")
-    args = ap.parse_args()
-
-    if not os.path.isfile(args.image):
-        print(f"Not a file: {args.image}", file=sys.stderr)
-        sys.exit(1)
-
-    build(args.image, args.out, args.target_mb, args.dry_run, args.interactive)
-
-
-if __name__ == "__main__":
-    main()
+    - name: Run LDCheck
+      run: |
+        if [ ! -d tools ] || [ ! -f tools/ldcheck ]; then
+          echo "::warning::tools/ldcheck not found in this repo — skipping dependency check."
+          exit 0
+        fi
+        cd tools
+        mv -n libneeds ${GITHUB_WORKSPACE}/android-recovery/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/recovery/root/
+        mv -n ldcheck ${GITHUB_WORKSPACE}/android-recovery/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/recovery/root/
+        cd ../android-recovery/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/recovery/root
+        python3 ldcheck -p system/lib64:vendor/lib64:system/lib:vendor/lib -d ${{ github.event.inputs.LDCHECK }}
+      continue-on-error: true
